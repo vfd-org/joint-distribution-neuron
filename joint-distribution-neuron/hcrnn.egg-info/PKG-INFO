@@ -1,0 +1,231 @@
+Metadata-Version: 2.1
+Name: hcrnn
+Version: 0.1.0
+Summary: Minimal prototype of HCR-based joint distribution neuron
+Author: HCR Neuron Project
+License: MIT
+Keywords: machine-learning,joint-distribution,polynomial-basis,bidirectional-inference
+Classifier: Development Status :: 3 - Alpha
+Classifier: Intended Audience :: Science/Research
+Classifier: License :: OSI Approved :: MIT License
+Classifier: Programming Language :: Python :: 3.11
+Classifier: Programming Language :: Python :: 3.12
+Classifier: Topic :: Scientific/Engineering :: Artificial Intelligence
+Requires-Python: >=3.11
+Description-Content-Type: text/markdown
+Requires-Dist: numpy>=1.24.0
+Requires-Dist: scipy>=1.10.0
+Requires-Dist: matplotlib>=3.7.0
+Provides-Extra: dev
+Requires-Dist: pytest>=7.0.0; extra == "dev"
+Requires-Dist: pytest-cov>=4.0.0; extra == "dev"
+
+# HCRNN: HCR-Based Joint Distribution Neuron
+
+A minimal Python prototype implementing the "joint distribution neuron" concept from Jarek Duda's paper [arXiv:2405.05097](https://arxiv.org/abs/2405.05097), as a stepping stone toward field-based / VFD-like architectures.
+
+## What is a Joint Distribution Neuron?
+
+Traditional neural networks learn **directed** conditional distributions:
+- A feedforward network learns `p(y | x)` and can only predict `y` from `x`
+- To predict `x` from `y`, you need a separate network
+
+A **joint distribution neuron** instead learns the full joint distribution `p(x, y)`:
+- From ONE learned representation, we can compute ANY conditional
+- Forward: `p(y | x)` and `E[y | x]`
+- Reverse: `p(x | y)` and `E[x | y]`
+- Marginals: `p(x)`, `p(y)`
+- Any combination with multiple variables
+
+This **bidirectional inference** capability is the key innovation that enables HCR (Hierarchical Correlation Reconstruction) networks.
+
+## How It Works
+
+The joint density is represented using a polynomial basis expansion:
+
+```
+ρ(x) = Σⱼ aⱼ fⱼ(x)
+```
+
+Where:
+- `fⱼ(x)` are tensor-product orthonormal polynomials on `[0,1]^d`
+- `aⱼ` are learned coefficients
+- Orthonormality enables efficient moment-matching: `aⱼ ≈ E[fⱼ(X)]`
+
+Conditioning is done by:
+1. Fixing the "given" variables to their values
+2. Evaluating the joint density over a grid of "target" values
+3. Normalizing to get the conditional density
+
+## Installation
+
+```bash
+# Clone or download this repository
+cd joint-distribution-neuron
+
+# Install dependencies
+pip install -r requirements.txt
+
+# Or install as package
+pip install -e .
+```
+
+Requirements:
+- Python 3.11+
+- numpy >= 1.24
+- scipy >= 1.10
+- matplotlib >= 3.7
+- pytest >= 7.0 (for tests)
+
+## Quick Start
+
+```python
+import numpy as np
+from hcrnn import build_tensor_basis, JointDensity
+from hcrnn import conditional_expectation, conditional_density
+
+# Generate some 2D data
+X = np.random.rand(1000, 2)  # Data in [0,1]^2
+
+# Build polynomial basis (degree 3 in each dimension)
+basis = build_tensor_basis(dim=2, degrees_per_dim=3)
+
+# Fit joint density
+joint = JointDensity(basis)
+joint.fit(X)
+
+# Bidirectional inference!
+# Forward: E[Y | X = 0.5]
+exp_y = conditional_expectation(joint, target_index=1,
+                                given_indices=[0], given_values=[0.5])
+
+# Reverse: E[X | Y = 0.7]
+exp_x = conditional_expectation(joint, target_index=0,
+                                given_indices=[1], given_values=[0.7])
+
+# Get full conditional density
+grid, density = conditional_density(joint, given_indices=[0],
+                                    given_values=[0.5], target_indices=[1])
+```
+
+## Running Tests
+
+```bash
+# Run all tests
+pytest
+
+# Run with verbose output
+pytest -v
+
+# Run specific test file
+pytest tests/test_basis.py
+```
+
+## Running the Demo
+
+```bash
+python examples/demo_2d_correlated.py
+```
+
+This generates samples from a 2D correlated Gaussian, fits a joint density, and demonstrates bidirectional inference with visualizations.
+
+## Project Structure
+
+```
+hcrnn/
+├── __init__.py           # Package exports
+├── basis.py              # Polynomial basis (shifted Legendre, tensor products)
+├── joint_density.py      # JointDensity class (the "neuron")
+└── conditionals.py       # Conditional inference utilities
+
+examples/
+└── demo_2d_correlated.py # 2D correlated Gaussian demo
+
+tests/
+├── test_basis.py         # Tests for polynomial basis
+├── test_joint_density.py # Tests for JointDensity
+└── test_conditionals.py  # Tests for conditional inference
+```
+
+## API Reference
+
+### `build_tensor_basis(dim, degrees_per_dim)`
+
+Create a tensor-product polynomial basis for `[0,1]^d`.
+
+- `dim`: Number of dimensions
+- `degrees_per_dim`: Max polynomial degree (int or list)
+
+Returns `TensorBasis` with methods:
+- `evaluate(X)`: Evaluate all basis functions at points
+- `num_basis`: Total number of basis functions
+
+### `JointDensity(basis)`
+
+Main class representing the learned joint distribution.
+
+Methods:
+- `fit(X)`: Learn coefficients from data `X` in `[0,1]^d`
+- `density(x)`: Evaluate density at point(s)
+- `log_density(x)`: Evaluate log density
+- `sample(n)`: Generate samples via rejection sampling
+- `integrate()`: Estimate integral (should be ≈1)
+- `normalize()`: Scale coefficients so integral = 1
+
+### Conditional Inference
+
+```python
+from hcrnn.conditionals import (
+    conditional_density,      # p(target | given)
+    conditional_expectation,  # E[target | given]
+    conditional_variance,     # Var[target | given]
+    conditional_mode,         # Mode of p(target | given)
+    marginal_density,         # p(target) after marginalizing
+    sample_conditional,       # Sample from p(target | given)
+)
+```
+
+## What This Prototype Does
+
+- Represents joint densities on `[0,1]^d` using orthonormal polynomial basis
+- Learns coefficients from data via moment matching
+- Computes conditional densities and expectations in ANY direction
+- Demonstrates bidirectional inference on synthetic data
+- Provides clean, tested, documented code as a foundation
+
+## What This Prototype Does NOT Do (Yet)
+
+- Multi-layer HCR networks (this is just ONE neuron)
+- High-dimensional data (practical limit ~3-5 dimensions)
+- Advanced basis functions (wavelets, neural network features)
+- GPU acceleration
+- Continuous field representations (VFD-style)
+- Integration with neural network frameworks
+
+## Known Limitations
+
+1. **Negative Density Regions**: Polynomial representations can produce negative values. We clamp these when needed, but it's a fundamental limitation.
+
+2. **Curse of Dimensionality**: The number of basis functions grows exponentially with dimension. Degree `n` in `d` dimensions gives `(n+1)^d` basis functions.
+
+3. **Numerical Integration**: Conditional inference relies on grid-based numerical integration, which becomes slow in higher dimensions.
+
+4. **Bounded Domain**: Data must be in `[0,1]^d`. Real data needs preprocessing (e.g., CDF transform, min-max scaling).
+
+## References
+
+- Duda, J. (2024). "Hierarchical Correlation Reconstruction with Joint Distribution Neuron" [arXiv:2405.05097](https://arxiv.org/abs/2405.05097)
+- Duda, J. - Various papers on HCR and VFD approaches
+
+## License
+
+MIT License - see LICENSE file.
+
+## Next Steps
+
+To extend this into a multi-layer HCR network:
+
+1. **Stacking**: Use output (samples or expectations) from one neuron as input to another
+2. **Hierarchical Structure**: Learn `p(h | x)` and `p(y | h)` for hidden variables `h`
+3. **Gradient-Based Training**: Replace moment matching with gradient descent for end-to-end learning
+4. **Richer Basis**: Use neural network features instead of fixed polynomials

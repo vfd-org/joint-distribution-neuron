@@ -47,3 +47,67 @@ Stack and train multiple joint-distribution units into a reversible network.
 
 ## 📂 Repository Structure
 
+joint-distribution-neuron/
+├── hcrnn/
+│ ├── init.py
+│ ├── basis.py
+│ ├── conditionals.py
+│ ├── joint_density.py
+│ └── network.py
+├── examples/
+│ ├── demo_2d_correlated.py
+│ ├── hcrnn_multilayer_demo.py
+│ └── *.png
+├── tests/
+│ ├── test_basis.py
+│ ├── test_conditionals.py
+│ ├── test_joint_density.py
+│ └── test_network.py
+├── pyproject.toml
+├── requirements.txt
+└── README.md
+
+yaml
+Copy code
+
+---
+
+## 📊 Quick Example
+
+A 2D joint-distribution neuron learning a correlated density and performing forward/reverse inference:
+
+```bash
+python examples/demo_2d_correlated.py
+A full multi-layer reversible network:
+
+bash
+Copy code
+python examples/hcrnn_multilayer_demo.py
+Example output (condensed):
+
+yaml
+Copy code
+HCRNetwork([2→4 → 4→2], fitted)
+
+Forward pass: X → Y
+Reverse pass: Y → X
+
+forward_mse: 0.6262
+reverse_mse: 0.9478
+🔧 Installation
+bash
+Copy code
+pip install -r requirements.txt
+or with pyproject.toml:
+
+bash
+Copy code
+pip install .
+📚 Background
+This project is inspired by:
+
+Jarek Duda — “Biology-inspired joint distribution neurons based on HCR allowing for multidirectional neural networks”
+arXiv:2405.05097
+
+The goal is experimental:
+to explore whether joint-density units can serve as flexible, biologically plausible building blocks for inference-driven neural architectures.

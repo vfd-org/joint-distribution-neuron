@@ -38,7 +38,10 @@ from hcrnn.network import (
     HCRNetwork,
     LayerSpec,
     LayerState,
+    build_default_network,
+    build_network_from_topology,
 )
+from hcrnn.pipeline import Pipeline
 from hcrnn.io import (
     save_density,
     load_density,
@@ -79,6 +82,10 @@ __all__ = [
     "HCRNetwork",
     "LayerSpec",
     "LayerState",
+    "build_default_network",
+    "build_network_from_topology",
+    # Pipeline
+    "Pipeline",
     # I/O utilities
     "save_density",
     "load_density",

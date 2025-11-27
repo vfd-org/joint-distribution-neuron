@@ -2,7 +2,10 @@
 
 A Python implementation of multi-layer Hierarchical Correlation Reconstruction (HCR) networks, based on Jarek Duda's joint distribution neuron concept from [arXiv:2405.05097](https://arxiv.org/abs/2405.05097).
 
-**v0.4 Features:**
+**v0.5 Features:**
+- Topology builder functions for easy network creation
+- Pipeline class for composing multiple HCRNetwork stages
+- Uncertainty propagation through pipelines
 - PyTorch integration wrappers for inference
 - Model save/load utilities (serialization)
 - N-dimensional support with total-degree basis (efficient for higher dimensions)
@@ -149,6 +152,45 @@ save_density(density, "my_density.pkl")
 density2 = load_density("my_density.pkl")
 ```
 
+### 10. **Topology Builders** (v0.5)
+```python
+from hcrnn import build_default_network, build_network_from_topology
+
+# Quick network with uniform hidden layers
+net = build_default_network(
+    dim_in=3, dim_out=2,
+    hidden_layers=2,  # Number of hidden layers
+    hidden_width=8,   # Width of hidden layers
+    degree=3          # Polynomial degree
+)
+# Creates: 3 → 8 → 8 → 2 network
+
+# Or specify exact topology
+net = build_network_from_topology([3, 16, 8, 2])
+# Creates: 3 → 16 → 8 → 2 network
+```
+
+### 11. **Pipeline** (v0.5)
+```python
+from hcrnn import Pipeline, build_default_network
+
+# Compose multiple networks into a pipeline
+encoder = build_default_network(dim_in=10, dim_out=4)
+decoder = build_default_network(dim_in=4, dim_out=10)
+
+pipe = Pipeline([encoder, decoder])
+
+# Train stages independently or end-to-end
+pipe.fit_end_to_end(X, Y, max_iter=5)
+
+# Forward/reverse through entire pipeline
+output = pipe.forward(X)
+reconstructed = pipe.reverse(output)
+
+# Get uncertainty at each stage
+output, variances = pipe.forward_with_uncertainty(X)
+```
+
 ## Installation
 
 ```bash
@@ -238,7 +280,8 @@ hcrnn/
 ├── basis.py              # Orthonormal polynomial basis
 ├── joint_density.py      # Single JointDensity neuron
 ├── conditionals.py       # Conditional inference utilities
-├── network.py            # Multi-layer HCRNetwork
+├── network.py            # Multi-layer HCRNetwork + topology builders
+├── pipeline.py           # Pipeline for composing networks (v0.5)
 ├── io.py                 # Save/load utilities (v0.4)
 └── torch_integration.py  # PyTorch wrappers (v0.4)
 
@@ -252,6 +295,8 @@ tests/
 ├── test_joint_density.py
 ├── test_conditionals.py
 ├── test_network.py
+├── test_topology.py            # Topology builder tests (v0.5)
+├── test_pipeline.py            # Pipeline tests (v0.5)
 ├── test_io.py                  # IO tests (v0.4)
 └── test_torch_integration.py   # Torch tests (v0.4)
 ```

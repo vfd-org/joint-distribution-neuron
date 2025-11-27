@@ -1022,3 +1022,133 @@ class HCRNetwork:
         )
         status = "fitted" if self._is_fitted else "not fitted"
         return f"HCRNetwork([{layers_str}], {status})"
+
+
+# ---------------------------------------------------------------------------
+# Topology Builder Functions
+# ---------------------------------------------------------------------------
+
+
+def build_default_network(
+    dim_in: int,
+    dim_out: int,
+    hidden_layers: int = 2,
+    hidden_width: int = 4,
+    degree: int = 3,
+    resonance_decay: float = 0.1,
+    seed: int = 42,
+) -> HCRNetwork:
+    """
+    Build an HCRNetwork with a standard topology.
+
+    Creates a network with uniform hidden layer widths and consistent
+    polynomial degree across all layers.
+
+    Args:
+        dim_in: Input dimensionality
+        dim_out: Output dimensionality
+        hidden_layers: Number of hidden layers (default 2)
+        hidden_width: Width of hidden layers (default 4)
+        degree: Polynomial degree for all joint densities (default 3)
+        resonance_decay: Regularization decay rate (default 0.1)
+        seed: Random seed for reproducibility (default 42)
+
+    Returns:
+        Unfitted HCRNetwork ready for training
+
+    Example:
+        >>> net = build_default_network(dim_in=3, dim_out=2, hidden_layers=2)
+        >>> # Creates: 3 → 4 → 4 → 2 network
+        >>> net.fit(X, Y)
+    """
+    if hidden_layers < 0:
+        raise ValueError("hidden_layers must be non-negative")
+    if hidden_width < 1:
+        raise ValueError("hidden_width must be at least 1")
+    if degree < 1:
+        raise ValueError("degree must be at least 1")
+
+    specs = []
+
+    if hidden_layers == 0:
+        # Direct connection: input → output
+        specs.append(LayerSpec(
+            input_dim=dim_in,
+            output_dim=dim_out,
+            basis_degree=degree,
+            resonance_decay=resonance_decay,
+        ))
+    else:
+        # First layer: input → hidden
+        specs.append(LayerSpec(
+            input_dim=dim_in,
+            output_dim=hidden_width,
+            basis_degree=degree,
+            resonance_decay=resonance_decay,
+        ))
+
+        # Hidden layers
+        for _ in range(hidden_layers - 1):
+            specs.append(LayerSpec(
+                input_dim=hidden_width,
+                output_dim=hidden_width,
+                basis_degree=degree,
+                resonance_decay=resonance_decay,
+            ))
+
+        # Last layer: hidden → output
+        specs.append(LayerSpec(
+            input_dim=hidden_width,
+            output_dim=dim_out,
+            basis_degree=degree,
+            resonance_decay=resonance_decay,
+        ))
+
+    return HCRNetwork(specs, seed=seed)
+
+
+def build_network_from_topology(
+    topology: Sequence[int],
+    degree: int = 3,
+    resonance_decay: float = 0.1,
+    seed: int = 42,
+) -> HCRNetwork:
+    """
+    Build an HCRNetwork from an explicit layer-width topology.
+
+    Args:
+        topology: Sequence of layer widths, e.g. [3, 8, 4, 2] for
+                  3 → 8 → 4 → 2 network
+        degree: Polynomial degree for all joint densities (default 3)
+        resonance_decay: Regularization decay rate (default 0.1)
+        seed: Random seed for reproducibility (default 42)
+
+    Returns:
+        Unfitted HCRNetwork ready for training
+
+    Raises:
+        ValueError: If topology has fewer than 2 elements
+
+    Example:
+        >>> net = build_network_from_topology([2, 8, 8, 3])
+        >>> # Creates: 2 → 8 → 8 → 3 network with 3 layers
+        >>> net.fit(X, Y)
+    """
+    topology = list(topology)
+
+    if len(topology) < 2:
+        raise ValueError("topology must have at least 2 elements (input and output)")
+
+    if any(d < 1 for d in topology):
+        raise ValueError("all dimensions in topology must be at least 1")
+
+    specs = []
+    for i in range(len(topology) - 1):
+        specs.append(LayerSpec(
+            input_dim=topology[i],
+            output_dim=topology[i + 1],
+            basis_degree=degree,
+            resonance_decay=resonance_decay,
+        ))
+
+    return HCRNetwork(specs, seed=seed)

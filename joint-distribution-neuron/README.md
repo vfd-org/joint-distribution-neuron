@@ -2,7 +2,9 @@
 
 A Python implementation of multi-layer Hierarchical Correlation Reconstruction (HCR) networks, based on Jarek Duda's joint distribution neuron concept from [arXiv:2405.05097](https://arxiv.org/abs/2405.05097).
 
-**v0.3 Features:**
+**v0.4 Features:**
+- PyTorch integration wrappers for inference
+- Model save/load utilities (serialization)
 - N-dimensional support with total-degree basis (efficient for higher dimensions)
 - Marginalization and conditioning operations for flexible inference
 - Information Bottleneck (IB) regularization for compression
@@ -112,6 +114,41 @@ print(f"Compression: {ib_loss['compression_loss']:.4f}")
 pruned = net.prune_coefficients(threshold=0.01)
 ```
 
+### 8. **PyTorch Integration** (v0.4)
+```python
+import torch
+from hcrnn import HCRNetwork, LayerSpec
+from hcrnn.torch_integration import HCRNetworkModule
+
+# Train a network
+specs = [LayerSpec(input_dim=2, output_dim=2, basis_degree=3)]
+net = HCRNetwork(specs)
+net.fit(X_train, Y_train)
+
+# Wrap for PyTorch inference
+module = HCRNetworkModule(net)
+
+# Use with PyTorch tensors
+x_tensor = torch.rand(10, 2)
+y_pred = module(x_tensor)  # Returns torch.Tensor
+
+# Reverse inference also works
+x_recon = module.reverse(y_pred)
+```
+
+### 9. **Saving & Loading Models** (v0.4)
+```python
+from hcrnn import save_network, load_network, save_density, load_density
+
+# Save and load a network
+save_network(net, "my_network.pkl")
+net2 = load_network("my_network.pkl")
+
+# Save and load a density
+save_density(density, "my_density.pkl")
+density2 = load_density("my_density.pkl")
+```
+
 ## Installation
 
 ```bash
@@ -121,6 +158,8 @@ pip install -e .
 ```
 
 Requirements: Python 3.8+, numpy, scipy, matplotlib, pytest
+
+Optional: For PyTorch integration, install torch: `pip install torch`
 
 ## Quick Start
 
@@ -199,7 +238,9 @@ hcrnn/
 ├── basis.py              # Orthonormal polynomial basis
 ├── joint_density.py      # Single JointDensity neuron
 ├── conditionals.py       # Conditional inference utilities
-└── network.py            # Multi-layer HCRNetwork
+├── network.py            # Multi-layer HCRNetwork
+├── io.py                 # Save/load utilities (v0.4)
+└── torch_integration.py  # PyTorch wrappers (v0.4)
 
 examples/
 ├── demo_2d_correlated.py       # Single neuron demo
@@ -210,7 +251,9 @@ tests/
 ├── test_basis.py
 ├── test_joint_density.py
 ├── test_conditionals.py
-└── test_network.py
+├── test_network.py
+├── test_io.py                  # IO tests (v0.4)
+└── test_torch_integration.py   # Torch tests (v0.4)
 ```
 
 ## API Reference

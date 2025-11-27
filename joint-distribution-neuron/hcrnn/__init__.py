@@ -5,7 +5,9 @@ A minimal prototype implementing Jarek Duda's joint distribution neuron
 concept from arXiv:2405.05097, using polynomial basis representations
 for bidirectional inference.
 
-v0.3 Features:
+v0.4 Features:
+- PyTorch integration wrappers for inference
+- Model save/load utilities
 - N-dimensional support with total-degree basis constraint
 - Marginalization and conditioning operations
 - Multi-layer networks with stacked bidirectional inference
@@ -37,8 +39,22 @@ from hcrnn.network import (
     LayerSpec,
     LayerState,
 )
+from hcrnn.io import (
+    save_density,
+    load_density,
+    save_network,
+    load_network,
+)
 
-__version__ = "0.3.0"
+# Conditionally import torch integration
+# Classes are always importable but raise at instantiation if torch is missing
+from hcrnn.torch_integration import (
+    HCRLayer,
+    HCRNetworkModule,
+    TORCH_AVAILABLE,
+)
+
+__version__ = "0.4.0"
 __all__ = [
     # Basis
     "orthonormal_poly_1d",
@@ -63,4 +79,13 @@ __all__ = [
     "HCRNetwork",
     "LayerSpec",
     "LayerState",
+    # I/O utilities
+    "save_density",
+    "load_density",
+    "save_network",
+    "load_network",
+    # PyTorch integration
+    "HCRLayer",
+    "HCRNetworkModule",
+    "TORCH_AVAILABLE",
 ]

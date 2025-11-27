@@ -4,16 +4,20 @@ Polynomial basis functions for joint density representation.
 This module provides:
 - Orthonormal 1D polynomial basis on [0,1] using shifted Legendre polynomials
 - Tensor-product basis for multi-dimensional domains [0,1]^d
+- Total-degree basis for N-dimensional domains (sum of degrees ≤ max_degree)
 
 The orthonormal basis allows efficient least-squares fitting of densities
 and enables the HCR neuron's bidirectional inference capability.
+
+v0.3: Added N-dimensional support with total-degree constraint for more
+efficient representation in higher dimensions.
 """
 
 from __future__ import annotations
 
 import itertools
 from dataclasses import dataclass
-from typing import Callable, Sequence
+from typing import Callable, Sequence, Union
 
 import numpy as np
 from numpy.polynomial import legendre as leg
@@ -274,3 +278,278 @@ def verify_orthonormality(
 
     is_orthonormal = max_error < tol
     return is_orthonormal, gram
+
+
+# =============================================================================
+# N-dimensional Total-Degree Basis (v0.3)
+# =============================================================================
+
+def enumerate_multi_indices(dim: int, total_degree: int) -> list[tuple[int, ...]]:
+    """
+    Enumerate all multi-indices (k1, ..., kd) where sum(ki) ≤ total_degree.
+
+    This gives fewer terms than full tensor product, scaling as
+    O(total_degree^dim / dim!) instead of O(total_degree^dim).
+
+    Args:
+        dim: Number of dimensions
+        total_degree: Maximum total degree (sum of individual degrees)
+
+    Returns:
+        List of multi-indices sorted by total degree then lexicographically.
+
+    Example:
+        >>> enumerate_multi_indices(2, 2)
+        [(0, 0), (0, 1), (1, 0), (0, 2), (1, 1), (2, 0)]
+        >>> len(enumerate_multi_indices(3, 3))  # C(3+3, 3) = 20
+        20
+    """
+    indices = []
+
+    def generate(current: list[int], remaining_degree: int, start_dim: int):
+        if start_dim == dim:
+            indices.append(tuple(current))
+            return
+        for k in range(remaining_degree + 1):
+            current.append(k)
+            generate(current, remaining_degree - k, start_dim + 1)
+            current.pop()
+
+    generate([], total_degree, 0)
+
+    # Sort by total degree, then lexicographically
+    indices.sort(key=lambda idx: (sum(idx), idx))
+    return indices
+
+
+def count_total_degree_terms(dim: int, total_degree: int) -> int:
+    """
+    Count the number of basis terms for given dimension and total degree.
+
+    Formula: C(dim + total_degree, dim) = (dim + total_degree)! / (dim! * total_degree!)
+
+    Args:
+        dim: Number of dimensions
+        total_degree: Maximum total degree
+
+    Returns:
+        Number of basis functions
+    """
+    # Use multiplicative formula to avoid overflow
+    result = 1
+    for i in range(1, dim + 1):
+        result = result * (total_degree + i) // i
+    return result
+
+
+def multi_index_to_flat(
+    multi_idx: tuple[int, ...],
+    dim: int,
+    total_degree: int,
+) -> int:
+    """
+    Convert a multi-index to its flat index in the enumeration.
+
+    Args:
+        multi_idx: Tuple (k1, ..., kd)
+        dim: Number of dimensions
+        total_degree: Maximum total degree
+
+    Returns:
+        Integer index in the sorted list of multi-indices
+
+    Raises:
+        ValueError: If multi_idx is invalid
+    """
+    if len(multi_idx) != dim:
+        raise ValueError(f"multi_idx must have {dim} elements")
+    if sum(multi_idx) > total_degree:
+        raise ValueError(f"sum({multi_idx}) = {sum(multi_idx)} > total_degree = {total_degree}")
+
+    # Find index by enumeration (could be optimized with combinatorial formula)
+    indices = enumerate_multi_indices(dim, total_degree)
+    return indices.index(tuple(multi_idx))
+
+
+def flat_to_multi_index(
+    flat_idx: int,
+    dim: int,
+    total_degree: int,
+) -> tuple[int, ...]:
+    """
+    Convert a flat index back to its multi-index.
+
+    Args:
+        flat_idx: Integer index
+        dim: Number of dimensions
+        total_degree: Maximum total degree
+
+    Returns:
+        Multi-index tuple (k1, ..., kd)
+
+    Raises:
+        IndexError: If flat_idx is out of range
+    """
+    indices = enumerate_multi_indices(dim, total_degree)
+    if flat_idx < 0 or flat_idx >= len(indices):
+        raise IndexError(f"flat_idx {flat_idx} out of range [0, {len(indices)})")
+    return indices[flat_idx]
+
+
+@dataclass
+class TotalDegreeBasis:
+    """
+    Polynomial basis for [0,1]^d with total degree constraint.
+
+    Unlike TensorBasis which uses per-dimension degree limits, this basis
+    constrains sum(k1 + k2 + ... + kd) ≤ total_degree. This is more efficient
+    for higher dimensions.
+
+    For d-dimensional input, creates basis functions as products of 1D
+    orthonormal polynomials:
+        f_{(k1,...,kd)}(x) = φ_{k1}(x_1) × φ_{k2}(x_2) × ... × φ_{kd}(x_d)
+
+    where sum(ki) ≤ total_degree.
+
+    Attributes:
+        dim: Number of dimensions
+        total_degree: Maximum sum of individual degrees
+        multi_indices: List of tuples (k1, k2, ..., kd) for each basis function
+        num_basis: Total number of basis functions
+    """
+    dim: int
+    total_degree: int
+    multi_indices: list[tuple[int, ...]]
+    _basis_1d: list[Callable[[np.ndarray], np.ndarray]]
+
+    @property
+    def num_basis(self) -> int:
+        """Total number of basis functions."""
+        return len(self.multi_indices)
+
+    def __len__(self) -> int:
+        return self.num_basis
+
+    def total_degree_of(self, basis_idx: int) -> int:
+        """Get the total degree (sum of indices) for a basis function."""
+        return sum(self.multi_indices[basis_idx])
+
+    def evaluate(self, x: np.ndarray) -> np.ndarray:
+        """
+        Evaluate all basis functions at given points.
+
+        Args:
+            x: Points in [0,1]^d. Shape (N, d) for N points, or (d,) for single point.
+
+        Returns:
+            Array of shape (N, num_basis) with f_j(x_i) for each point and basis.
+            If x has shape (d,), returns shape (num_basis,).
+        """
+        x = np.asarray(x)
+        single_point = (x.ndim == 1)
+        if single_point:
+            x = x.reshape(1, -1)
+
+        if x.shape[1] != self.dim:
+            raise ValueError(f"Expected {self.dim} dimensions, got {x.shape[1]}")
+
+        n_points = x.shape[0]
+
+        # Pre-compute all needed 1D basis evaluations
+        # We need degrees 0 to total_degree for each dimension
+        basis_1d_vals: list[list[np.ndarray]] = []
+        for d in range(self.dim):
+            dim_vals = []
+            for k in range(self.total_degree + 1):
+                dim_vals.append(self._basis_1d[k](x[:, d]))
+            basis_1d_vals.append(dim_vals)
+
+        # Compute tensor products for each multi-index
+        result = np.zeros((n_points, self.num_basis))
+        for j, multi_idx in enumerate(self.multi_indices):
+            product = np.ones(n_points)
+            for d, k in enumerate(multi_idx):
+                product *= basis_1d_vals[d][k]
+            result[:, j] = product
+
+        if single_point:
+            return result[0]
+        return result
+
+    def evaluate_single(self, x: np.ndarray, basis_idx: int) -> float:
+        """
+        Evaluate a single basis function at a single point.
+
+        Args:
+            x: Point in [0,1]^d, shape (d,)
+            basis_idx: Index of basis function to evaluate
+
+        Returns:
+            Scalar value of basis function at x
+        """
+        x = np.asarray(x)
+        if x.shape != (self.dim,):
+            raise ValueError(f"Expected shape ({self.dim},), got {x.shape}")
+
+        multi_idx = self.multi_indices[basis_idx]
+        result = 1.0
+        for d, k in enumerate(multi_idx):
+            result *= self._basis_1d[k](x[d])
+        return float(result)
+
+    def get_basis_funcs(self) -> list[Callable[[np.ndarray], float]]:
+        """Return list of individual basis functions as callables."""
+        funcs = []
+        for j in range(self.num_basis):
+            def make_func(idx: int) -> Callable[[np.ndarray], float]:
+                def f(x: np.ndarray) -> float:
+                    return self.evaluate_single(x, idx)
+                return f
+            funcs.append(make_func(j))
+        return funcs
+
+    # Compatibility property to match TensorBasis interface
+    @property
+    def degrees(self) -> tuple[int, ...]:
+        """Per-dimension max degree (for compatibility with TensorBasis)."""
+        return tuple([self.total_degree] * self.dim)
+
+
+def build_total_degree_basis(dim: int, total_degree: int) -> TotalDegreeBasis:
+    """
+    Build a total-degree polynomial basis for [0,1]^d.
+
+    Creates basis functions where the sum of individual polynomial degrees
+    is at most total_degree. This is more efficient than full tensor product
+    for higher dimensions.
+
+    Args:
+        dim: Number of dimensions
+        total_degree: Maximum sum of polynomial degrees
+
+    Returns:
+        TotalDegreeBasis object for evaluating basis functions
+
+    Example:
+        >>> basis = build_total_degree_basis(dim=3, total_degree=2)
+        >>> basis.num_basis  # C(3+2, 3) = 10
+        10
+        >>> basis.multi_indices[0]
+        (0, 0, 0)
+    """
+    # Get all multi-indices
+    multi_indices = enumerate_multi_indices(dim, total_degree)
+
+    # Build 1D basis up to total_degree
+    basis_1d = orthonormal_poly_1d(total_degree)
+
+    return TotalDegreeBasis(
+        dim=dim,
+        total_degree=total_degree,
+        multi_indices=multi_indices,
+        _basis_1d=basis_1d,
+    )
+
+
+# Type alias for any basis type
+BasisType = Union[TensorBasis, TotalDegreeBasis]

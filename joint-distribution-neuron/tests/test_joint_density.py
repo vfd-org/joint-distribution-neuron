@@ -6,8 +6,8 @@ import numpy as np
 import pytest
 from scipy import stats
 
-from hcrnn.basis import build_tensor_basis
-from hcrnn.joint_density import JointDensity
+from hcrnn.basis import build_tensor_basis, build_total_degree_basis
+from hcrnn.joint_density import JointDensity, ConditionalDensity
 
 
 def generate_correlated_gaussian_data(
@@ -314,3 +314,266 @@ class TestJointDensityRepr:
         repr_str = repr(density)
         assert "fitted" in repr_str
         assert "not fitted" not in repr_str
+
+
+# =============================================================================
+# v0.3 Tests: Total Degree Basis
+# =============================================================================
+
+class TestTotalDegreeBasis:
+    """Tests for total-degree basis support."""
+
+    def test_init_total_degree(self):
+        """Test initialization with total-degree basis."""
+        basis = build_total_degree_basis(dim=3, total_degree=3)
+        density = JointDensity(basis)
+        assert density.dim == 3
+        # C(3+3, 3) = 20 terms
+        assert basis.num_basis == 20
+
+    def test_fit_3d_total_degree(self):
+        """Fit on 3D data with total-degree basis."""
+        basis = build_total_degree_basis(dim=3, total_degree=3)
+        density = JointDensity(basis)
+
+        rng = np.random.default_rng(42)
+        X = rng.uniform(0, 1, size=(500, 3))
+        density.fit(X)
+
+        assert density.coeffs is not None
+        assert density.coeffs.shape == (20,)
+
+    def test_evaluate_3d_total_degree(self):
+        """Evaluate 3D density with total-degree basis."""
+        basis = build_total_degree_basis(dim=3, total_degree=3)
+        density = JointDensity(basis)
+
+        rng = np.random.default_rng(42)
+        X = rng.uniform(0, 1, size=(500, 3))
+        density.fit(X)
+
+        # Evaluate at a point
+        x = np.array([0.5, 0.5, 0.5])
+        rho = density.density(x)
+        assert np.isfinite(rho)
+
+        # Batch evaluation
+        X_test = rng.uniform(0, 1, size=(50, 3))
+        rho_batch = density.density(X_test)
+        assert rho_batch.shape == (50,)
+        assert np.all(np.isfinite(rho_batch))
+
+    def test_total_degree_fewer_terms_than_tensor(self):
+        """Total-degree basis should have fewer terms than tensor product."""
+        from hcrnn.basis import count_total_degree_terms
+
+        for dim in [3, 4, 5]:
+            for degree in [2, 3]:
+                n_total = count_total_degree_terms(dim, degree)
+                n_tensor = (degree + 1) ** dim
+                assert n_total < n_tensor
+
+
+# =============================================================================
+# v0.3 Tests: Marginalization
+# =============================================================================
+
+class TestMarginalization:
+    """Tests for marginalize() method."""
+
+    def test_marginalize_3d_to_2d(self):
+        """Marginalize 3D density to 2D."""
+        basis = build_total_degree_basis(dim=3, total_degree=3)
+        density = JointDensity(basis)
+
+        rng = np.random.default_rng(42)
+        X = rng.uniform(0, 1, size=(1000, 3))
+        density.fit(X)
+
+        # Marginalize to keep dims 0 and 1
+        marginal = density.marginalize([0, 1])
+
+        assert marginal.dim == 2
+        assert marginal.coeffs is not None
+
+    def test_marginalize_3d_to_1d(self):
+        """Marginalize 3D density to 1D."""
+        basis = build_total_degree_basis(dim=3, total_degree=3)
+        density = JointDensity(basis)
+
+        rng = np.random.default_rng(42)
+        X = rng.uniform(0, 1, size=(1000, 3))
+        density.fit(X)
+
+        # Marginalize to keep only dim 0
+        marginal = density.marginalize([0])
+
+        assert marginal.dim == 1
+        assert marginal.coeffs is not None
+
+        # Should integrate to approximately 1
+        integral = marginal.integrate(n_samples=10000)
+        assert abs(integral - 1.0) < 0.2
+
+    def test_marginalize_preserves_integration(self):
+        """Marginal should integrate to approximately 1."""
+        basis = build_total_degree_basis(dim=3, total_degree=2)
+        density = JointDensity(basis)
+
+        rng = np.random.default_rng(42)
+        X = rng.uniform(0, 1, size=(2000, 3))
+        density.fit(X)
+
+        marginal_01 = density.marginalize([0, 1])
+        marginal_2 = density.marginalize([2])
+
+        # Both should integrate to ~1
+        int_01 = marginal_01.integrate(n_samples=10000)
+        int_2 = marginal_2.integrate(n_samples=10000)
+
+        assert abs(int_01 - 1.0) < 0.2
+        assert abs(int_2 - 1.0) < 0.2
+
+    def test_marginalize_requires_fit(self):
+        """marginalize() should raise if not fitted."""
+        basis = build_total_degree_basis(dim=3, total_degree=2)
+        density = JointDensity(basis)
+
+        with pytest.raises(RuntimeError):
+            density.marginalize([0, 1])
+
+    def test_marginalize_validates_dims(self):
+        """marginalize() should validate dimension indices."""
+        basis = build_total_degree_basis(dim=3, total_degree=2)
+        density = JointDensity(basis)
+
+        rng = np.random.default_rng(42)
+        X = rng.uniform(0, 1, size=(500, 3))
+        density.fit(X)
+
+        with pytest.raises(ValueError):
+            density.marginalize([])  # Empty
+
+        with pytest.raises(ValueError):
+            density.marginalize([0, 5])  # Invalid dim
+
+
+# =============================================================================
+# v0.3 Tests: Conditioning
+# =============================================================================
+
+class TestConditioning:
+    """Tests for condition_on() method."""
+
+    def test_condition_on_single_dim(self):
+        """Condition on a single dimension."""
+        basis = build_total_degree_basis(dim=3, total_degree=3)
+        density = JointDensity(basis)
+
+        rng = np.random.default_rng(42)
+        X = rng.uniform(0, 1, size=(1000, 3))
+        density.fit(X)
+
+        # Condition on x2 = 0.5
+        cond = density.condition_on({2: 0.5})
+
+        assert isinstance(cond, ConditionalDensity)
+        assert cond.free_dim == 2
+        assert cond.free_dims == [0, 1]
+
+    def test_condition_on_multiple_dims(self):
+        """Condition on multiple dimensions."""
+        basis = build_total_degree_basis(dim=3, total_degree=3)
+        density = JointDensity(basis)
+
+        rng = np.random.default_rng(42)
+        X = rng.uniform(0, 1, size=(1000, 3))
+        density.fit(X)
+
+        # Condition on x0 = 0.3, x1 = 0.7
+        cond = density.condition_on({0: 0.3, 1: 0.7})
+
+        assert cond.free_dim == 1
+        assert cond.free_dims == [2]
+
+    def test_conditional_sample(self):
+        """Sample from conditional distribution."""
+        basis = build_total_degree_basis(dim=3, total_degree=3)
+        density = JointDensity(basis)
+
+        rng = np.random.default_rng(42)
+        X = rng.uniform(0, 1, size=(1000, 3))
+        density.fit(X)
+
+        cond = density.condition_on({2: 0.5})
+        samples = cond.sample(100)
+
+        assert samples.shape == (100, 2)
+        assert np.all(samples >= 0)
+        assert np.all(samples <= 1)
+
+    def test_conditional_expected_value(self):
+        """Compute expected value from conditional."""
+        basis = build_total_degree_basis(dim=3, total_degree=3)
+        density = JointDensity(basis)
+
+        rng = np.random.default_rng(42)
+        X = rng.uniform(0, 1, size=(1000, 3))
+        density.fit(X)
+
+        cond = density.condition_on({2: 0.5})
+        expected = cond.expected_value(n_samples=2000)
+
+        assert expected.shape == (2,)
+        # For uniform data, expected values should be near 0.5
+        assert np.all(np.abs(expected - 0.5) < 0.3)
+
+    def test_condition_on_requires_fit(self):
+        """condition_on() should raise if not fitted."""
+        basis = build_total_degree_basis(dim=3, total_degree=2)
+        density = JointDensity(basis)
+
+        with pytest.raises(RuntimeError):
+            density.condition_on({0: 0.5})
+
+    def test_condition_on_validates_dims(self):
+        """condition_on() should validate fixed dimensions."""
+        basis = build_total_degree_basis(dim=3, total_degree=2)
+        density = JointDensity(basis)
+
+        rng = np.random.default_rng(42)
+        X = rng.uniform(0, 1, size=(500, 3))
+        density.fit(X)
+
+        with pytest.raises(ValueError):
+            density.condition_on({5: 0.5})  # Invalid dim
+
+        with pytest.raises(ValueError):
+            density.condition_on({0: -0.1})  # Value out of range
+
+    def test_condition_on_all_dims_raises(self):
+        """Conditioning on all dims should raise."""
+        basis = build_total_degree_basis(dim=2, total_degree=2)
+        density = JointDensity(basis)
+
+        rng = np.random.default_rng(42)
+        X = rng.uniform(0, 1, size=(500, 2))
+        density.fit(X)
+
+        with pytest.raises(ValueError):
+            density.condition_on({0: 0.5, 1: 0.5})  # No free dims
+
+    def test_conditional_repr(self):
+        """Test ConditionalDensity string representation."""
+        basis = build_total_degree_basis(dim=3, total_degree=2)
+        density = JointDensity(basis)
+
+        rng = np.random.default_rng(42)
+        X = rng.uniform(0, 1, size=(500, 3))
+        density.fit(X)
+
+        cond = density.condition_on({1: 0.5})
+        repr_str = repr(cond)
+
+        assert "free_dims" in repr_str
+        assert "x1=0.500" in repr_str

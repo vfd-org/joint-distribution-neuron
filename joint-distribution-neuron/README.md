@@ -2,7 +2,12 @@
 
 A Python implementation of multi-layer Hierarchical Correlation Reconstruction (HCR) networks, based on Jarek Duda's joint distribution neuron concept from [arXiv:2405.05097](https://arxiv.org/abs/2405.05097).
 
-**Now featuring multi-layer networks with bidirectional inference, resonance regularization, and uncertainty propagation.**
+**v0.3 Features:**
+- N-dimensional support with total-degree basis (efficient for higher dimensions)
+- Marginalization and conditioning operations for flexible inference
+- Information Bottleneck (IB) regularization for compression
+- Multi-layer networks with bidirectional inference
+- Resonance regularization and uncertainty propagation
 
 ## Architecture Overview
 
@@ -73,6 +78,40 @@ Three training methods:
 - `cmaes`: Powell optimization
 - `coordinate`: Coordinate descent
 
+### 5. **N-Dimensional with Total-Degree Basis** (v0.3)
+```python
+from hcrnn import build_total_degree_basis, JointDensity
+
+# Efficient basis for higher dimensions
+# Total-degree: sum(k_i) <= degree, not product
+basis = build_total_degree_basis(dim=5, total_degree=3)
+# Only 56 terms vs 1024 for tensor product!
+```
+
+### 6. **Marginalization and Conditioning** (v0.3)
+```python
+# Marginalize: p(x0, x1, x2) -> p(x0, x2)
+marginal = density.marginalize([0, 2])
+
+# Condition: p(x0, x1 | x2 = 0.5)
+conditional = density.condition_on({2: 0.5})
+samples = conditional.sample(100)
+expected = conditional.expected_value()
+```
+
+### 7. **Information Bottleneck Regularization** (v0.3)
+```python
+# Train with IB regularization for compression
+net.fit_with_ib(X, Y, lambda_ib=0.1, beta=1.0)
+
+# Compute IB loss components
+ib_loss = net.compute_ib_loss(X, Y)
+print(f"Compression: {ib_loss['compression_loss']:.4f}")
+
+# Prune small coefficients for sparser model
+pruned = net.prune_coefficients(threshold=0.01)
+```
+
 ## Installation
 
 ```bash
@@ -135,11 +174,14 @@ print(f"Reverse RMSE: {errors['reverse_rmse']:.4f}")
 ## Running the Demos
 
 ```bash
-# Single neuron demo
+# Single neuron demo (2D)
 python examples/demo_2d_correlated.py
 
 # Multi-layer network demo
 python examples/hcrnn_multilayer_demo.py
+
+# 3D marginalization and conditioning demo (v0.3)
+python examples/demo_3d_mixed_moments.py
 ```
 
 ## Running Tests
@@ -160,8 +202,9 @@ hcrnn/
 └── network.py            # Multi-layer HCRNetwork
 
 examples/
-├── demo_2d_correlated.py      # Single neuron demo
-└── hcrnn_multilayer_demo.py   # Multi-layer demo
+├── demo_2d_correlated.py       # Single neuron demo
+├── hcrnn_multilayer_demo.py    # Multi-layer demo
+└── demo_3d_mixed_moments.py    # 3D marginalization/conditioning (v0.3)
 
 tests/
 ├── test_basis.py

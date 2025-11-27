@@ -6,6 +6,8 @@ This module implements the core JointDensity class that:
 - Learns coefficients from data via moment matching
 - Evaluates density and log-density at arbitrary points
 - Samples from the learned density via rejection sampling
+- Marginalizes over subsets of variables (v0.3)
+- Conditions on fixed values to produce lower-dimensional conditionals (v0.3)
 
 This is the "neuron" in the HCR (Hierarchical Correlation Reconstruction)
 framework, capable of bidirectional inference through conditioning.
@@ -15,12 +17,16 @@ Reference: Duda, J. (2024). "Joint distribution neuron" arXiv:2405.05097
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Dict, Sequence, Union
 
 import numpy as np
 
 if TYPE_CHECKING:
-    from hcrnn.basis import TensorBasis
+    from hcrnn.basis import TensorBasis, TotalDegreeBasis, BasisType
+
+# Import for runtime use
+from hcrnn.basis import build_tensor_basis, build_total_degree_basis, BasisType
 
 
 class JointDensity:
@@ -353,3 +359,292 @@ class JointDensity:
             f"num_basis={self.basis.num_basis}, "
             f"status={fitted})"
         )
+
+    # =========================================================================
+    # Marginalization and Conditioning (v0.3)
+    # =========================================================================
+
+    def marginalize(self, keep_dims: Sequence[int]) -> JointDensity:
+        """
+        Marginalize over dimensions not in keep_dims.
+
+        Returns a new JointDensity over the specified subset of variables.
+        The marginal is computed by integrating out the other dimensions,
+        which for orthonormal bases means keeping only terms where the
+        marginalized dimensions have degree 0.
+
+        Args:
+            keep_dims: Indices of dimensions to keep (0-indexed)
+
+        Returns:
+            New JointDensity over the kept dimensions
+
+        Example:
+            >>> # For a 3D density p(x0, x1, x2), marginalize to p(x0, x2)
+            >>> marginal = density.marginalize([0, 2])
+        """
+        if self.coeffs is None:
+            raise RuntimeError("Must call fit() before marginalizing")
+
+        keep_dims = list(keep_dims)
+        if len(keep_dims) == 0:
+            raise ValueError("keep_dims must not be empty")
+        if len(keep_dims) == self.dim:
+            # No marginalization needed, return a copy
+            new_basis = build_total_degree_basis(self.dim, self._get_max_degree())
+            result = JointDensity(new_basis)
+            result.coeffs = self.coeffs.copy()
+            result._fit_data = self._fit_data.copy() if self._fit_data is not None else None
+            return result
+
+        # Validate dimensions
+        for d in keep_dims:
+            if d < 0 or d >= self.dim:
+                raise ValueError(f"Invalid dimension {d}, must be in [0, {self.dim})")
+
+        new_dim = len(keep_dims)
+        max_degree = self._get_max_degree()
+
+        # Create new basis for marginal
+        new_basis = build_total_degree_basis(new_dim, max_degree)
+
+        # For orthonormal basis, marginalizing means:
+        # - Integrate out dimensions not in keep_dims
+        # - For product basis f(x) = φ_k1(x1) * φ_k2(x2) * ...
+        # - ∫φ_k(x) dx = 1 if k=0, else 0 (orthonormality with constant φ_0 = 1)
+        # So we keep only terms where marginalized dims have degree 0
+
+        marginalized_dims = [d for d in range(self.dim) if d not in keep_dims]
+
+        new_coeffs = np.zeros(new_basis.num_basis)
+
+        for old_idx, old_multi_idx in enumerate(self.basis.multi_indices):
+            # Check if all marginalized dimensions have degree 0
+            skip = False
+            for d in marginalized_dims:
+                if old_multi_idx[d] != 0:
+                    skip = True
+                    break
+            if skip:
+                continue
+
+            # Extract degrees for kept dimensions
+            new_multi_idx = tuple(old_multi_idx[d] for d in keep_dims)
+
+            # Find corresponding index in new basis
+            if sum(new_multi_idx) <= max_degree:
+                try:
+                    new_idx = new_basis.multi_indices.index(new_multi_idx)
+                    new_coeffs[new_idx] = self.coeffs[old_idx]
+                except ValueError:
+                    pass  # Multi-index not in new basis (shouldn't happen)
+
+        result = JointDensity(new_basis)
+        result.coeffs = new_coeffs
+
+        # Also marginalize stored data if available
+        if self._fit_data is not None:
+            result._fit_data = self._fit_data[:, keep_dims].copy()
+
+        return result
+
+    def condition_on(self, fixed: Dict[int, float]) -> ConditionalDensity:
+        """
+        Condition on fixed values for some dimensions.
+
+        Returns a ConditionalDensity representing p(free_dims | fixed_dims = values).
+
+        Args:
+            fixed: Dictionary mapping dimension index to fixed value.
+                   Values should be in [0, 1].
+
+        Returns:
+            ConditionalDensity object for the conditional distribution
+
+        Example:
+            >>> # For p(x0, x1, x2), condition on x1=0.5
+            >>> cond = density.condition_on({1: 0.5})
+            >>> samples = cond.sample(100)  # Samples from p(x0, x2 | x1=0.5)
+        """
+        if self.coeffs is None:
+            raise RuntimeError("Must call fit() before conditioning")
+
+        # Validate fixed dimensions
+        for d, v in fixed.items():
+            if d < 0 or d >= self.dim:
+                raise ValueError(f"Invalid dimension {d}")
+            if v < 0 or v > 1:
+                raise ValueError(f"Value {v} for dim {d} must be in [0, 1]")
+
+        free_dims = [d for d in range(self.dim) if d not in fixed]
+        if len(free_dims) == 0:
+            raise ValueError("At least one dimension must remain free")
+
+        return ConditionalDensity(self, fixed, free_dims)
+
+    def _get_max_degree(self) -> int:
+        """Get maximum polynomial degree from basis."""
+        if hasattr(self.basis, 'total_degree'):
+            return self.basis.total_degree
+        else:
+            # TensorBasis
+            return max(self.basis.degrees)
+
+
+@dataclass
+class ConditionalDensity:
+    """
+    Conditional density p(free_dims | fixed_dims = values).
+
+    Created by calling JointDensity.condition_on(). Supports:
+    - Evaluating the conditional density at points
+    - Sampling from the conditional
+    - Computing expected values (for 1D conditionals)
+
+    Attributes:
+        joint: Parent JointDensity
+        fixed: Dictionary of {dim_index: fixed_value}
+        free_dims: List of dimension indices that are free
+    """
+    joint: JointDensity
+    fixed: Dict[int, float]
+    free_dims: list
+
+    def __post_init__(self):
+        """Initialize internal state."""
+        self.free_dim = len(self.free_dims)
+        self._rng = np.random.default_rng()
+
+        # Pre-evaluate fixed dimension basis values
+        max_degree = self.joint._get_max_degree()
+        from hcrnn.basis import orthonormal_poly_1d
+        basis_1d = orthonormal_poly_1d(max_degree)
+
+        self._fixed_basis_vals = {}
+        for d, v in self.fixed.items():
+            self._fixed_basis_vals[d] = [basis_1d[k](np.array([v]))[0]
+                                         for k in range(max_degree + 1)]
+
+    def density(self, x: np.ndarray, normalize: bool = True) -> np.ndarray:
+        """
+        Evaluate conditional density at given points.
+
+        Args:
+            x: Points in [0,1]^free_dim. Shape (free_dim,) or (N, free_dim).
+            normalize: If True, normalize by marginal at fixed point
+
+        Returns:
+            Density values, shape () for single point or (N,) for batch
+        """
+        x = np.asarray(x)
+        single_point = (x.ndim == 1)
+        if single_point:
+            x = x.reshape(1, -1)
+
+        if x.shape[1] != self.free_dim:
+            raise ValueError(f"Expected {self.free_dim} free dims, got {x.shape[1]}")
+
+        n_points = x.shape[0]
+
+        # Build full points with fixed values inserted
+        full_points = np.zeros((n_points, self.joint.dim))
+        for i, d in enumerate(self.free_dims):
+            full_points[:, d] = x[:, i]
+        for d, v in self.fixed.items():
+            full_points[:, d] = v
+
+        # Evaluate joint density
+        rho = self.joint.density(full_points, clamp=True)
+
+        # Normalize by marginal at fixed point if requested
+        if normalize:
+            # Marginal is estimated by integrating out free dims
+            # For simple case, use current evaluation as unnormalized
+            # and normalize by Monte Carlo estimate
+            pass  # Skip normalization for now (TODO: proper normalization)
+
+        if single_point:
+            return float(rho[0])
+        return rho
+
+    def sample(self, n_samples: int, max_iterations: int = 100) -> np.ndarray:
+        """
+        Sample from the conditional distribution.
+
+        Uses rejection sampling over the free dimensions.
+
+        Args:
+            n_samples: Number of samples to generate
+            max_iterations: Max iterations for rejection sampling
+
+        Returns:
+            Array of shape (n_samples, free_dim)
+        """
+        # Estimate max density over free dimensions via grid
+        n_grid = min(1000, 10 ** self.free_dim)
+        X_grid = self._rng.uniform(0, 1, size=(n_grid, self.free_dim))
+        rho_grid = self.density(X_grid, normalize=False)
+        rho_max = np.max(rho_grid) * 1.2
+
+        if rho_max <= 0:
+            rho_max = 1.0
+
+        # Rejection sampling
+        samples = []
+        for _ in range(max_iterations):
+            batch_size = max(n_samples * 10, 1000)
+            candidates = self._rng.uniform(0, 1, size=(batch_size, self.free_dim))
+            rho = self.density(candidates, normalize=False)
+
+            u = self._rng.uniform(0, rho_max, size=batch_size)
+            accepted = candidates[u < rho]
+            samples.append(accepted)
+
+            if sum(len(s) for s in samples) >= n_samples:
+                break
+
+        all_samples = np.vstack(samples) if samples else np.zeros((0, self.free_dim))
+
+        if len(all_samples) >= n_samples:
+            return all_samples[:n_samples]
+        else:
+            # Fallback: uniform samples
+            n_remaining = n_samples - len(all_samples)
+            fallback = self._rng.uniform(0, 1, size=(n_remaining, self.free_dim))
+            if len(all_samples) > 0:
+                return np.vstack([all_samples, fallback])
+            return fallback
+
+    def expected_value(self, n_samples: int = 10000) -> np.ndarray:
+        """
+        Compute expected value E[X_free | X_fixed = fixed_values].
+
+        Uses Monte Carlo integration.
+
+        Args:
+            n_samples: Number of samples for Monte Carlo
+
+        Returns:
+            Array of shape (free_dim,) with expected values
+        """
+        samples = self.sample(n_samples)
+        return np.mean(samples, axis=0)
+
+    def variance(self, n_samples: int = 10000) -> np.ndarray:
+        """
+        Compute variance Var[X_free | X_fixed = fixed_values].
+
+        Uses Monte Carlo integration.
+
+        Args:
+            n_samples: Number of samples for Monte Carlo
+
+        Returns:
+            Array of shape (free_dim,) with variances
+        """
+        samples = self.sample(n_samples)
+        return np.var(samples, axis=0)
+
+    def __repr__(self) -> str:
+        fixed_str = ", ".join(f"x{d}={v:.3f}" for d, v in self.fixed.items())
+        return f"ConditionalDensity(free_dims={self.free_dims}, fixed=[{fixed_str}])"

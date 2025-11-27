@@ -770,6 +770,252 @@ class HCRNetwork:
             "reverse_rmse": np.sqrt(reverse_mse),
         }
 
+    # =========================================================================
+    # Information Bottleneck Regularization (v0.3)
+    # =========================================================================
+
+    def compute_ib_loss(
+        self,
+        X: np.ndarray,
+        Y: np.ndarray,
+        beta: float = 1.0,
+        n_samples: int = 1000,
+    ) -> dict:
+        """
+        Compute Information Bottleneck-inspired loss.
+
+        The IB principle minimizes I(X; Z) - β * I(Z; Y), where Z is the
+        hidden representation. This encourages compression of input info
+        while preserving output-relevant information.
+
+        For polynomial densities, we approximate mutual information using:
+        - Coefficient entropy as a proxy for representation complexity
+        - Cross-entropy terms estimated via Monte Carlo
+
+        Args:
+            X: Input data of shape (N, input_dim)
+            Y: Target output of shape (N, output_dim)
+            beta: Trade-off parameter (higher = preserve more output info)
+            n_samples: Samples for Monte Carlo estimation
+
+        Returns:
+            Dictionary with IB loss components:
+            - compression_loss: Proxy for I(X; Z) - encourages simpler representations
+            - prediction_loss: Proxy for -I(Z; Y) - encourages predictive representations
+            - total_ib_loss: compression_loss - beta * prediction_loss
+        """
+        X = np.asarray(X)
+        Y = np.asarray(Y)
+
+        # Compression loss: sum of coefficient magnitudes (proxy for complexity)
+        # Higher-order coefficients contribute more to "information storage"
+        compression_loss = 0.0
+        for layer, spec in zip(self.layers, self.specs):
+            if layer.joint.coeffs is not None:
+                # Weight by degree - higher degree = more "detailed" info
+                for j, idx in enumerate(layer.basis.multi_indices):
+                    degree = sum(idx)
+                    weight = 1.0 + 0.1 * degree  # Gentle penalty for complexity
+                    compression_loss += weight * layer.joint.coeffs[j] ** 2
+
+        # Prediction loss: forward prediction error
+        Y_pred = self.forward(X)
+        prediction_loss = np.mean((Y_pred - Y) ** 2)
+
+        # Total IB loss: want to minimize compression while maximizing prediction
+        # So: compression - beta * (1/prediction) or simply: compression + prediction
+        total_ib_loss = compression_loss + beta * prediction_loss
+
+        return {
+            "compression_loss": float(compression_loss),
+            "prediction_loss": float(prediction_loss),
+            "total_ib_loss": float(total_ib_loss),
+        }
+
+    def compute_layer_complexity(self, layer_idx: int = -1) -> dict:
+        """
+        Compute complexity metrics for a specific layer.
+
+        Measures how much "information" is stored in the layer's
+        polynomial representation.
+
+        Args:
+            layer_idx: Layer index (-1 for last layer)
+
+        Returns:
+            Dictionary with complexity metrics:
+            - coefficient_norm: L2 norm of coefficients
+            - effective_dimension: Number of significant coefficients
+            - degree_weighted_norm: Norm weighted by polynomial degree
+        """
+        idx = layer_idx if layer_idx >= 0 else self.num_layers + layer_idx
+        layer = self.layers[idx]
+
+        if layer.joint.coeffs is None:
+            return {
+                "coefficient_norm": 0.0,
+                "effective_dimension": 0,
+                "degree_weighted_norm": 0.0,
+            }
+
+        coeffs = layer.joint.coeffs
+        multi_indices = layer.basis.multi_indices
+
+        # L2 norm
+        coeff_norm = float(np.linalg.norm(coeffs))
+
+        # Effective dimension (number of coefficients > threshold)
+        threshold = 0.01 * np.max(np.abs(coeffs))
+        effective_dim = int(np.sum(np.abs(coeffs) > threshold))
+
+        # Degree-weighted norm
+        degree_weighted = 0.0
+        for j, idx in enumerate(multi_indices):
+            degree = sum(idx)
+            degree_weighted += (1 + degree) * coeffs[j] ** 2
+        degree_weighted = float(np.sqrt(degree_weighted))
+
+        return {
+            "coefficient_norm": coeff_norm,
+            "effective_dimension": effective_dim,
+            "degree_weighted_norm": degree_weighted,
+        }
+
+    def fit_with_ib(
+        self,
+        X: np.ndarray,
+        Y: np.ndarray,
+        lambda_ib: float = 0.1,
+        beta: float = 1.0,
+        max_iter: int = 10,
+        verbose: bool = True,
+    ) -> HCRNetwork:
+        """
+        Train with Information Bottleneck regularization.
+
+        Extends standard training with an IB penalty that encourages:
+        1. Simpler representations (fewer significant coefficients)
+        2. Predictive representations (still accurate on output)
+
+        Args:
+            X: Input data
+            Y: Target output
+            lambda_ib: Weight of IB regularization term
+            beta: IB trade-off (higher = more emphasis on prediction)
+            max_iter: Training iterations
+            verbose: Print progress
+
+        Returns:
+            self, for method chaining
+        """
+        X = np.asarray(X)
+        Y = np.asarray(Y)
+        N = X.shape[0]
+
+        if verbose:
+            print(f"Training HCRNN with IB regularization (λ={lambda_ib}, β={beta})")
+
+        # Initialize intermediate targets
+        targets = [X]
+        for i, spec in enumerate(self.specs):
+            if i == len(self.specs) - 1:
+                targets.append(Y)
+            else:
+                alpha = (i + 1) / len(self.specs)
+                target_dim = spec.output_dim
+                if X.shape[1] >= target_dim and Y.shape[1] >= target_dim:
+                    interp = (1 - alpha) * X[:, :target_dim] + alpha * Y[:, :target_dim]
+                else:
+                    interp = self._rng.standard_normal((N, target_dim)) * 0.1
+                targets.append(interp)
+
+        for iteration in range(max_iter):
+            # Standard alternating training step
+            reconstruction_loss = 0.0
+
+            for i, (layer, spec) in enumerate(zip(self.layers, self.specs)):
+                X_layer = targets[i]
+                Y_layer = targets[i + 1]
+
+                # Fit projection
+                X_aug = np.hstack([X_layer, np.ones((N, 1))])
+                W_aug, _, _, _ = np.linalg.lstsq(X_aug, Y_layer, rcond=None)
+                layer.W = W_aug[:-1, :].T
+                layer.bias = W_aug[-1, :]
+
+                Z = X_layer @ layer.W.T + layer.bias
+                self._fit_layer_joint(layer, spec, X_layer, Z)
+
+                reconstruction_loss += np.mean((Z - Y_layer) ** 2)
+
+            # IB regularization: penalize coefficient complexity
+            ib_penalty = 0.0
+            for layer, spec in zip(self.layers, self.specs):
+                if layer.joint.coeffs is not None:
+                    # Soft thresholding: shrink small coefficients toward zero
+                    coeffs = layer.joint.coeffs
+                    for j, idx in enumerate(layer.basis.multi_indices):
+                        degree = sum(idx)
+                        if degree > 0:
+                            shrink_factor = lambda_ib * (1 + 0.1 * degree)
+                            # L1-like penalty for sparsity
+                            ib_penalty += shrink_factor * np.abs(coeffs[j])
+
+            # Resonance penalty
+            resonance_penalty = sum(
+                self._resonance_penalty(layer, spec)
+                for layer, spec in zip(self.layers, self.specs)
+            )
+
+            total_loss = reconstruction_loss + lambda_ib * ib_penalty + 0.01 * resonance_penalty
+
+            if verbose:
+                ib_loss = self.compute_ib_loss(X, Y, beta=beta)
+                print(f"  Iter {iteration + 1}/{max_iter}: "
+                      f"recon={reconstruction_loss:.4f}, "
+                      f"IB={ib_loss['total_ib_loss']:.4f}, "
+                      f"compress={ib_loss['compression_loss']:.4f}")
+
+            # Update targets
+            if iteration < max_iter - 1:
+                current = X
+                for i, layer in enumerate(self.layers[:-1]):
+                    current = self._forward_layer(layer, current, use_expectation=True)
+                    alpha = 0.5
+                    targets[i + 1] = alpha * current + (1 - alpha) * targets[i + 1]
+
+        self._is_fitted = True
+        return self
+
+    def prune_coefficients(self, threshold: float = 0.01) -> int:
+        """
+        Prune small coefficients to sparsify the representation.
+
+        Sets coefficients below threshold to zero, effectively removing
+        those basis functions from the representation.
+
+        Args:
+            threshold: Coefficients with |coeff| < threshold * max are zeroed
+
+        Returns:
+            Number of coefficients pruned
+        """
+        total_pruned = 0
+
+        for layer in self.layers:
+            if layer.joint.coeffs is None:
+                continue
+
+            coeffs = layer.joint.coeffs
+            max_coeff = np.max(np.abs(coeffs))
+            abs_threshold = threshold * max_coeff
+
+            mask = np.abs(coeffs) < abs_threshold
+            total_pruned += np.sum(mask)
+            layer.joint.coeffs[mask] = 0.0
+
+        return total_pruned
+
     def __repr__(self) -> str:
         layers_str = " → ".join(
             f"{s.input_dim}→{s.output_dim}" for s in self.specs

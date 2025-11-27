@@ -207,9 +207,11 @@ class TestHCRNetworkTraining:
         assert net._is_fitted
         Y_pred = net.forward(X)
         mse = np.mean((Y_pred - Y) ** 2)
-        # Prototype: just verify it produces finite outputs
+        # Prototype: verify it produces finite outputs
         # Performance optimization is future work
         assert np.isfinite(mse)
+        # MSE should at least be bounded (not exploding)
+        assert mse < 100.0
 
     def test_fit_linear_coordinate(self):
         """Train on linear data using coordinate descent."""
